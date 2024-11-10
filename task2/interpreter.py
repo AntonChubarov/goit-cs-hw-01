@@ -10,7 +10,11 @@ class TokenType:
     INTEGER = "INTEGER"
     PLUS = "PLUS"
     MINUS = "MINUS"
-    EOF = "EOF"  # Означає кінець вхідного рядка
+    MUL = "MUL"
+    DIV = "DIV"
+    LPAREN = "LPAREN"
+    RPAREN = "RPAREN"
+    EOF = "EOF"
 
 
 class Token:
@@ -29,20 +33,17 @@ class Lexer:
         self.current_char = self.text[self.pos]
 
     def advance(self):
-        """Переміщуємо 'вказівник' на наступний символ вхідного рядка"""
         self.pos += 1
         if self.pos > len(self.text) - 1:
-            self.current_char = None  # Означає кінець введення
+            self.current_char = None  # Indicates end of input
         else:
             self.current_char = self.text[self.pos]
 
     def skip_whitespace(self):
-        """Пропускаємо пробільні символи."""
         while self.current_char is not None and self.current_char.isspace():
             self.advance()
 
     def integer(self):
-        """Повертаємо ціле число, зібране з послідовності цифр."""
         result = ""
         while self.current_char is not None and self.current_char.isdigit():
             result += self.current_char
@@ -50,24 +51,32 @@ class Lexer:
         return int(result)
 
     def get_next_token(self):
-        """Лексичний аналізатор, що розбиває вхідний рядок на токени."""
         while self.current_char is not None:
             if self.current_char.isspace():
                 self.skip_whitespace()
                 continue
-
             if self.current_char.isdigit():
                 return Token(TokenType.INTEGER, self.integer())
-
-            if self.current_char == "+":
+            if self.current_char == '+':
                 self.advance()
-                return Token(TokenType.PLUS, "+")
-
-            if self.current_char == "-":
+                return Token(TokenType.PLUS, '+')
+            if self.current_char == '-':
                 self.advance()
-                return Token(TokenType.MINUS, "-")
+                return Token(TokenType.MINUS, '-')
+            if self.current_char == '*':
+                self.advance()
+                return Token(TokenType.MUL, '*')
+            if self.current_char == '/':
+                self.advance()
+                return Token(TokenType.DIV, '/')
+            if self.current_char == '(':
+                self.advance()
+                return Token(TokenType.LPAREN, '(')
+            if self.current_char == ')':
+                self.advance()
+                return Token(TokenType.RPAREN, ')')
 
-            raise LexicalError("Помилка лексичного аналізу")
+            raise LexicalError(f"Unknown character: {self.current_char}")
 
         return Token(TokenType.EOF, None)
 
@@ -94,38 +103,46 @@ class Parser:
         self.lexer = lexer
         self.current_token = self.lexer.get_next_token()
 
-    def error(self):
-        raise ParsingError("Помилка синтаксичного аналізу")
+    def error(self, message):
+        raise ParsingError(message)
 
     def eat(self, token_type):
-        """
-        Порівнюємо поточний токен з очікуваним токеном і, якщо вони збігаються,
-        'поглинаємо' його і переходимо до наступного токена.
-        """
         if self.current_token.type == token_type:
             self.current_token = self.lexer.get_next_token()
         else:
-            self.error()
+            self.error(f"Expected token {token_type}, got {self.current_token.type}")
+
+    def factor(self):
+        token = self.current_token
+        if token.type == TokenType.INTEGER:
+            self.eat(TokenType.INTEGER)
+            return token
+        elif token.type == TokenType.LPAREN:
+            self.eat(TokenType.LPAREN)
+            result = self.expr()
+            self.eat(TokenType.RPAREN)
+            return result
 
     def term(self):
-        """Парсер для 'term' правил граматики. У нашому випадку - це цілі числа."""
-        token = self.current_token
-        self.eat(TokenType.INTEGER)
-        return Num(token)
+        node = self.factor()
+        while self.current_token.type in (TokenType.MUL, TokenType.DIV):
+            token = self.current_token
+            if token.type == TokenType.MUL:
+                self.eat(TokenType.MUL)
+            elif token.type == TokenType.DIV:
+                self.eat(TokenType.DIV)
+            node = (token, node, self.factor())
+        return node
 
     def expr(self):
-        """Парсер для арифметичних виразів."""
         node = self.term()
-
         while self.current_token.type in (TokenType.PLUS, TokenType.MINUS):
             token = self.current_token
             if token.type == TokenType.PLUS:
                 self.eat(TokenType.PLUS)
             elif token.type == TokenType.MINUS:
                 self.eat(TokenType.MINUS)
-
-            node = BinOp(left=node, op=token, right=self.term())
-
+            node = (token, node, self.term())
         return node
 
 
@@ -149,10 +166,19 @@ class Interpreter:
         self.parser = parser
 
     def visit_BinOp(self, node):
-        if node.op.type == TokenType.PLUS:
-            return self.visit(node.left) + self.visit(node.right)
-        elif node.op.type == TokenType.MINUS:
-            return self.visit(node.left) - self.visit(node.right)
+        op = node[0]
+        left = self.visit(node[1])
+        right = self.visit(node[2])
+        if op.type == TokenType.PLUS:
+            return left + right
+        elif op.type == TokenType.MINUS:
+            return left - right
+        elif op.type == TokenType.MUL:
+            return left * right
+        elif op.type == TokenType.DIV:
+            if right == 0:
+                raise ZeroDivisionError("Division by zero.")
+            return left / right
 
     def visit_Num(self, node):
         return node.value
@@ -162,29 +188,10 @@ class Interpreter:
         return self.visit(tree)
 
     def visit(self, node):
-        method_name = "visit_" + type(node).__name__
-        visitor = getattr(self, method_name, self.generic_visit)
-        return visitor(node)
+        if isinstance(node, Token):
+            return self.visit_Num(node)
+        elif isinstance(node, tuple):
+            return self.visit_BinOp(node)
 
     def generic_visit(self, node):
-        raise Exception(f"Немає методу visit_{type(node).__name__}")
-
-
-def main():
-    while True:
-        try:
-            text = input('Введіть вираз (або "exit" для виходу): ')
-            if text.lower() == "exit":
-                print("Вихід із програми.")
-                break
-            lexer = Lexer(text)
-            parser = Parser(lexer)
-            interpreter = Interpreter(parser)
-            result = interpreter.interpret()
-            print(result)
-        except Exception as e:
-            print(e)
-
-
-if __name__ == "__main__":
-    main()
+        raise Exception(f"Method visit_{type(node).__name__} is not implemented")
